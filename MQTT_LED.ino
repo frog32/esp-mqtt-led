@@ -7,8 +7,10 @@
 #include <DoubleResetDetector.h>
 #include "FastLED.h"
 #include <Ticker.h>
+#include <ArduinoJson.h>
 
 #include <string.h>
+
 
 
 #define DATA_PIN 5
@@ -49,10 +51,24 @@ Ticker LEDcontroll;
 
 #define LIGHT_OFF 0
 #define LIGHT_ON 1
-#define EFFECT_SOLID 1
-#define EFFECT_RAINBOW 2
-#define EFFECT_COLORLOOP 3
-#define EFFECT_GRADIENT 4
+
+#define EFFECT_SOLID 0
+#define EFFECT_RAINBOW 1
+#define EFFECT_COLORLOOP 2
+#define EFFECT_GRADIENT 3
+#define EFFECT_JUNGLE 4
+#define EFFECT_CONFETTI 5
+#define EFFECT_LIGHTNING 6
+
+const char effectMap[7][10] = {
+ "solid",
+ "rainbow",
+ "colorloop",
+ "gradient", // todo: implement
+ "jungle",
+ "confetti",
+ "lightning",
+};
 
 struct light {
   unsigned char state = LIGHT_OFF;
@@ -98,11 +114,11 @@ void setup() {
   Serial.println("Create LEDs");
   LEDS.addLeds<WS2811, DATA_PIN, GRB>(leds, MQTT_LED_config.num_leds);
   yield();
-  FastLED.setMaxPowerInVoltsAndMilliamps(5, 800);
+  FastLED.setMaxPowerInVoltsAndMilliamps(5, 300);  // todo: move to settings
 
   client.setCallback(mqttCallback);
 
-  LEDcontroll.attach(0.05, LEDupdate);
+  LEDcontroll.attach(0.02, LEDupdate);
 
   delay(5000);
   drd.stop();
@@ -122,26 +138,39 @@ void loop() {
 static uint8_t hue = 0;
 
 void LEDupdate(void) {
-   switch (light.state ? light.effect : LIGHT_OFF)
-  {
-    case LIGHT_OFF:
-      fill_solid(leds, MQTT_LED_config.num_leds, CRGB::Black);
-      break;
-    case EFFECT_SOLID:
-      fill_solid(leds, MQTT_LED_config.num_leds, CRGB(light.red, light.green, light.blue));
-      break;
-    case EFFECT_RAINBOW:
-      // First slide the led in one direction
-      fill_rainbow(leds, MQTT_LED_config.num_leds, hue++ * 5, 255 / MQTT_LED_config.num_leds);
-      break;
-    case EFFECT_COLORLOOP:
-      fill_solid(leds, MQTT_LED_config.num_leds, CHSV(hue++ * 5, 255, 255));
-      break;
-    case EFFECT_GRADIENT:
-//      fill_gradient(leds, 0, CRGB(light.red, light.green, light.blue), MQTT_LED_config.num_leds, CRGB(light.red2, light.green2, light.blue2), SHORTEST_HUES);
-      break;
-    default:
-      Serial.println("non valid effect");
+  int i;  // used in some effects
+  if(light.state == LIGHT_OFF) {
+     fill_solid(leds, MQTT_LED_config.num_leds, CRGB::Black);
+  } else {
+    switch (light.state ? light.effect : LIGHT_OFF)
+    {
+      case EFFECT_SOLID:
+        fill_solid(leds, MQTT_LED_config.num_leds, CRGB(light.red, light.green, light.blue));  // todo: refactor CRGB(light.red, light.green, light.blue)
+        break;
+      case EFFECT_RAINBOW:
+        // First slide the led in one direction
+        fill_rainbow(leds, MQTT_LED_config.num_leds, hue++ * 5, 255 / MQTT_LED_config.num_leds);
+        break;
+      case EFFECT_COLORLOOP:
+        fill_solid(leds, MQTT_LED_config.num_leds, CHSV(hue++ * 5, 255, 255));
+        break;
+      case EFFECT_GRADIENT:
+  //      fill_gradient(leds, 0, CRGB(light.red, light.green, light.blue), MQTT_LED_config.num_leds, CRGB(light.red2, light.green2, light.blue2), SHORTEST_HUES);
+        break;
+      case EFFECT_JUNGLE:
+        fadeToBlackBy( leds, MQTT_LED_config.num_leds, 20);
+        for ( i = 0; i < MQTT_LED_config.num_leds; i = i + 10) {
+          leds[beatsin16(i + 7, 0, MQTT_LED_config.num_leds)] |= CRGB(light.red, light.green, light.blue);
+        }
+        break;
+      case EFFECT_CONFETTI:
+        fadeToBlackBy( leds, MQTT_LED_config.num_leds, 20);
+        i = random16(MQTT_LED_config.num_leds);
+        leds[i] += CRGB(random8(64), random8(64), random8(64));
+        break;
+      default:
+        Serial.println("non valid effect");
+    }
   }
   FastLED.setBrightness(light.brightness);
   FastLED.show();
@@ -153,75 +182,78 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   char message_buffer[12];  // used for numeric to int conversion
   int i;
   Serial.println(topic);
-  if (strcmp (topic + prefix_lenght, "/light/switch") == 0) {
-    if (length == 3 and memcmp(payload, "OFF", 3) == 0) {
-      light.state = LIGHT_OFF;
-      client.publish(buildTopic("/light/status"), "OFF");
-    }
-    else if (length == 2 and memcmp(payload, "ON", 2) == 0) {
-      light.state = LIGHT_ON;
-      client.publish(buildTopic("/light/status"), "ON");
-    } else {
-      Serial.print("received invalid command to light/switch ");
-      Serial.println(light.state);
-    }
-  }
-  else if (strcmp (topic + prefix_lenght, "/brightness/set") == 0) {
-    Serial.println("brightness");
-    memcpy(message_buffer, payload, _min(3, length));
-    message_buffer[_min(length, 11)] = '\0';
-    light.brightness = (unsigned char)atoi(message_buffer);
-    sprintf(message_buffer, "%d", light.brightness);
-    client.publish(buildTopic("/brightness/status"), message_buffer); 
-  }
-
-  else if (strcmp (topic + prefix_lenght, "/rgb/set") == 0) {
-    Serial.println("rgb");
-    // store old color for multi color effects
-    light.red2 = light.red;
-    light.green2 = light.green;
-    light.blue2 = light.blue;
-    memcpy(message_buffer, payload, _min(sizeof(message_buffer) - 1, length));
-    message_buffer[_min(length, 11)] = '\0';
-    light.red = atoi(message_buffer);
-    i = strcspn(message_buffer, ",") + 1;
-    light.green = atoi(message_buffer + i);
-    i = strcspn(&message_buffer[i], ",") + i + 1;
-    light.blue = atoi(message_buffer + i);
-    sprintf(message_buffer, "%d,%d,%d", light.red, light.green, light.blue);
-    client.publish(buildTopic("/rgb/status"), message_buffer); 
-  }
-
-  else if (strcmp (topic + prefix_lenght, "/effect/set") == 0) {
-    Serial.println("effect");
-    if (length == 5 and memcmp(payload, "solid", 5) == 0) {
-      light.effect = EFFECT_SOLID;
-      client.publish(buildTopic("/effect/status"), "solid");
-    }
-    else if (length == 7 and memcmp(payload, "rainbow", 7) == 0) {
-      light.effect = EFFECT_RAINBOW;
-      client.publish(buildTopic("/effect/status"), "rainbow");
-    }
-    else if (length == 9 and memcmp(payload, "colorloop", 7) == 0) {
-      light.effect = EFFECT_COLORLOOP;
-      client.publish(buildTopic("/effect/status"), "colorloop");
-    }
-    else if (length == 9 and memcmp(payload, "gradient", 7) == 0) {
-      light.effect = EFFECT_GRADIENT;
-      client.publish(buildTopic("/effect/status"), "gradient");
-    } else {
-      Serial.print("received invalid command to light/effect ");
-      Serial.println(light.state);
-    }
-  }
-  
-  else if (strcmp (topic + prefix_lenght, "/num_leds/set") == 0) {
+  if (strcmp (topic + prefix_lenght, "/num_leds/set") == 0) {  // todo: move to settings
     Serial.println("num_leds");
     memcpy(message_buffer, payload, _min(3, length));
     message_buffer[_min(length, 11)] = '\0';
     MQTT_LED_config.num_leds = (unsigned short)atoi(message_buffer);
     saveMQTTConfig();
   }
+
+  else if(strcmp (topic + prefix_lenght, "/set") == 0) {
+    parseJSONCommand(payload, length);
+    sendJSONStatus();
+  }
+}
+
+void parseJSONCommand(byte* payload, unsigned int length) {
+  // todo: check if input is of correct type http://arduinojson.org/api/jsonvariant/is/
+  char message_buffer[512];
+  memcpy(message_buffer, payload, _min(511, length));
+  DynamicJsonBuffer inputJsonBuffer;
+  JsonObject& input = inputJsonBuffer.parseObject(message_buffer);
+  if(input.containsKey("state") && input["state"].is<char*>()) {
+    const char* state = input["state"];
+    if(strcmp(state, "ON") == 0) {
+      light.state = LIGHT_ON;
+    }
+    else if(strcmp(state, "OFF") == 0) {
+      light.state = LIGHT_OFF;
+    }
+  }
+  if(input.containsKey("brightness") && input["brightness"].is<int>()) {
+    light.brightness = input["brightness"];
+  }
+  if(input.containsKey("color") && input["color"].is<JsonObject>() && input["color"]["r"].is<int>()
+      && input["color"]["g"].is<int>() && input["color"]["b"].is<int>()) {
+    // store old color for multi color effects
+    light.red2 = light.red;  // todo: find a better solution
+    light.green2 = light.green;
+    light.blue2 = light.blue;
+    light.red = input["color"]["r"];
+    light.green = input["color"]["g"];
+    light.blue = input["color"]["b"];
+  }
+  if(input.containsKey("effect") && input["effect"].is<char*>()) {
+    for(int i = 0; i < sizeof(effectMap); i++) {
+      Serial.print("test ");
+      Serial.print(effectMap[i]);
+      if(strcmp(input["effect"], effectMap[i]) == 0) {
+        Serial.print("found");
+        light.effect = i;
+        break;
+      }
+    }
+
+  }
+}
+
+void sendJSONStatus() {
+    // build reply
+  char message_buffer[512];
+  DynamicJsonBuffer outputJsonBuffer;
+  JsonObject& output = outputJsonBuffer.createObject();
+  output["state"] = light.state == LIGHT_ON ? "ON": "OFF";
+  sprintf(message_buffer, "%d", light.brightness);
+  output["brightness"] = light.brightness;
+  JsonObject& color = output.createNestedObject("color");
+  color["r"] = light.red;
+  color["g"] = light.green;
+  color["b"] = light.blue;
+  output["effect"] = (char*)effectMap[light.effect];
+  output.printTo(message_buffer);
+  Serial.println(message_buffer);
+  client.publish(buildTopic("/status"), message_buffer);
 
 }
 
